@@ -1,0 +1,8 @@
+# CODEOWNERS define quién tiene que revisar, no quién puede tocar el código (propiedad colectiva).
+# En el equipo real, cada línea apunta al equipo de GitHub correspondiente (@auda/squad-auditoria, etc.).
+*                         @Tomas-Romero
+/apps/worker/             @Tomas-Romero   # Squad Auditoría & IA
+/apps/web/billing/        @Tomas-Romero   # Squad Crecimiento (pagos: requiere 2 aprobaciones)
+/supabase/migrations/     @Tomas-Romero   # squad dueño del esquema + Plataforma
+/.github/workflows/       @Tomas-Romero   # Plataforma & DevOps
+/docs/politicas/          @Tomas-Romero   # Agile Coach + Tech Leads

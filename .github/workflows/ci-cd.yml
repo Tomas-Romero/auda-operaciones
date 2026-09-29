@@ -1,0 +1,129 @@
+# Pipeline de CI/CD de Auda (diseño de la Parte III · 3.2)
+# lint -> build -> tests (cobertura >= 80 %) -> SAST -> staging + E2E -> producción (canary)
+#
+# Este repositorio es el "manual de operaciones" y todavía no tiene el código de la app.
+# Por eso el primer job detecta si hay package.json: si no hay, los jobs de la app se
+# marcan como "skipped" y solo corre la validación de políticas. En el repo de la app
+# el mismo archivo corre completo.
+
+name: CI/CD
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  politicas:
+    name: Políticas publicadas (DoR, DoD, WIP, clases de servicio)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verificar que las políticas existan
+        run: |
+          for f in docs/politicas/definition-of-ready.md docs/politicas/definition-of-done.md \
+                   docs/politicas/limites-wip.md docs/politicas/clases-de-servicio.md \
+                   docs/politicas/severidades-incidentes.md; do
+            test -s "$f" || { echo "::error::Falta la política $f"; exit 1; }
+            echo "OK  $f"
+          done
+
+  detectar:
+    name: Detectar código de la aplicación
+    runs-on: ubuntu-latest
+    outputs:
+      hay_app: ${{ steps.check.outputs.hay_app }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: check
+        run: |
+          if [ -f package.json ]; then
+            echo "hay_app=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "hay_app=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Repositorio de documentación: se omiten los jobs de la aplicación."
+          fi
+
+  lint:
+    name: 1 · Lint y tipos
+    needs: detectar
+    if: needs.detectar.outputs.hay_app == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run lint            # ESLint + Prettier
+      - run: npx tsc --noEmit        # TypeScript strict
+
+  build:
+    name: 2 · Build
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm run build           # Next.js + API + imagen del worker
+
+  tests:
+    name: 3 · Tests (cobertura >= 80 %)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npx supabase start      # base local para tests de integración
+      - run: npx vitest run --coverage --coverage.thresholds.lines=80
+
+  sast:
+    name: 4 · Seguridad (SAST, dependencias, secretos)
+    needs: detectar
+    if: needs.detectar.outputs.hay_app == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 0 }
+      - uses: github/codeql-action/init@v3
+        with: { languages: javascript-typescript }
+      - uses: github/codeql-action/analyze@v3
+      - run: npm audit --audit-level=high
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  staging:
+    name: 5 · Deploy a staging + E2E
+    needs: [tests, sast]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/deploy.sh staging
+      - run: npx playwright test --grep @smoke    # escenarios Gherkin automatizados
+
+  produccion:
+    name: 6 · Producción (canary 10 %)
+    needs: staging
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/deploy.sh production --canary 10
+      - run: ./scripts/verificar-canary.sh --minutos 10   # si el error rate supera el baseline: rollback
+      - run: ./scripts/deploy.sh production --promote
